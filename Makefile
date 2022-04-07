@@ -15,22 +15,18 @@ TEMPLATE = $(CURDIR)
 #-----------------------------------
 .PHONY: devenv
 .venv:
+	@python3 --version
 	python3 -m venv $@
 	# upgrading package managers
 	$@/bin/pip install --upgrade \
 		pip \
 		wheel \
 		setuptools
-	# tooling
-	$@/bin/pip install pip-tools
 
-requirements.txt: .venv requirements.in
-	# freezes requirements
-	$</bin/pip-compile --upgrade --build-isolation --output-file $@ $(word2, $^)
 
-devenv: .venv requirements.txt ## create a python virtual environment with tools to dev, run and tests cookie-cutter
+devenv: .venv  ## create a python virtual environment with tools to dev, run and tests cookie-cutter
 	# installing extra tools
-	@$</bin/pip3 install -r  $(word 2,$^)
+	@$</bin/pip3 install -r requirements.txt
 	# your dev environment contains
 	@$</bin/pip3 list
 	@echo "To activate the virtual environment, run 'source $</bin/activate'"
@@ -88,7 +84,7 @@ help: ## this colorful help
 	@awk --posix 'BEGIN {FS = ":.*?## "} /^[[:alpha:][:space:]_-]+:.*?## / {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo ""
 
-git_clean_args = -dxf --exclude=.vscode/ --exclude=.venv/
+git_clean_args = -dxf --exclude=.vscode/
 
 .PHONY: clean clean-force
 clean: ## cleans all unversioned files in project and temp files create by this makefile
