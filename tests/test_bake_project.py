@@ -1,56 +1,59 @@
-#pylint: disable=W0621
+# pylint: disable=redefined-outer-name
+# pylint: disable=unused-argument
+# pylint: disable=unused-variable
 
 import json
-import logging
-import os
+
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict
 
+from pytest_cookies.plugin import Cookies, Result
 import pytest
 
-# current directory
-current_dir = Path(sys.argv[0] if __name__ ==
-                   "__main__" else __file__).resolve().parent
-
-logger = logging.getLogger(__name__)
+current_dir = Path(sys.argv[0] if __name__ == "__main__" else __file__).resolve().parent
+repo_basedir =current_dir.parent
+cookiecutter_json = repo_basedir / "cookiecutter.json"
 
 
-def test_project_tree(cookies):
-    result = cookies.bake(extra_context={'project_slug': 'test_project'})
+
+def test_minimal_config_to_bake(cookies: Cookies):
+    result = cookies.bake(extra_context={"project_slug": "test_project"})
     assert result.exit_code == 0
     assert result.exception is None
-    assert result.project.basename == 'test_project'
+    assert result.project.basename == "test_project"
+
+    print(f"{result}", f"{result.context=}")
 
 
-def _get_cookiecutter_config() -> Dict:
-    cookiecutter_config_file = current_dir / "../cookiecutter.json"
-    with cookiecutter_config_file.open() as fp:
-        return json.load(fp)
-
-
-flavors = _get_cookiecutter_config()["docker_base"]
-
-
-@pytest.fixture(params=flavors)
-def baked_project(cookies, request):
-    return cookies.bake(extra_context={'project_slug': 'dummy-project', 'default_docker_registry': 'test.test.com', 'docker_base': request.param})
-
-
-commands = (
-    "ls -la .",
-    "make help",
-    "make devenv",
-    "make devenv build up",
-    "make devenv build-devel up-devel",
-    "make info-build",
-    "make devenv build tests",
+@pytest.fixture(
+    params=json.loads(cookiecutter_json.read_text())["docker_base"]
 )
+def baked_project(cookies: Cookies, request) -> Result:
+    result = cookies.bake(
+        extra_context={
+            "project_slug": "DummyProject",
+            "project_name": "dummy-project",
+            "default_docker_registry": "test.test.com",
+            "docker_base": request.param,
+        }
+    )
+
+    assert result.exception is None
+    assert result.exit_code == 0
+    return result
 
 
-@pytest.mark.parametrize("command", commands)
-def test_run_tests(baked_project, command: str):
-    working_dir = Path(baked_project.project)
-    assert subprocess.run(command.split(), cwd=working_dir,
-                          check=True).returncode == 0
+@pytest.mark.parametrize(
+    "commands_on_baked_project",
+    (
+        "ls -la .; make help",
+        # TODO: cannot use `source` to activate venvs ... not sure how to proceed here. Suggestions?
+        ## "make devenv; source .venv/bin/activate && make build info-build test",
+    ),
+)
+def test_make_workflows(baked_project: Result, commands_on_baked_project: str):
+    working_dir = baked_project.project_path
+    subprocess.run(
+        ["/bin/bash", "-c", commands_on_baked_project], cwd=working_dir, check=True
+    )

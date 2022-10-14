@@ -11,14 +11,14 @@
 SHELL = /bin/sh
 .DEFAULT_GOAL := help
 
-export VCS_URL    := $(shell git config --get remote.origin.url || echo unversioned)
-export VCS_REF    := $(shell git rev-parse --short HEAD || echo unversioned)
-export VCS_STATUS := $(if $(shell git status -s || echo unversioned),'modified/untracked','clean')
+export VCS_URL    := $(shell git config --get remote.origin.url 2> /dev/null || echo unversioned repo)
+export VCS_REF    := $(shell git rev-parse --short HEAD 2> /dev/null || echo unversioned repo)
+export VCS_STATUS := $(if $(shell git status -s 2> /dev/null || echo unversioned repo),'modified/untracked','clean')
 export BUILD_DATE := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 export DOCKER_REGISTRY   ?= {{ cookiecutter.default_docker_registry }}
 export DOCKER_IMAGE_NAME ?= {{ cookiecutter.project_name.lower().replace(' ', '-') }}
-export DOCKER_IMAGE_TAG  ?= $(shell cat VERSION)
+export DOCKER_IMAGE_TAG  ?= $(shell cat VERSION 2> /dev/null || echo undefined)
 
 export COMPOSE_INPUT_DIR  := ./validation/input
 export COMPOSE_OUTPUT_DIR := .tmp/output
@@ -39,13 +39,14 @@ APP_NAME := {{ cookiecutter.project_slug }}
 	$@/bin/pip3 install \
 		pip-tools
 
+
 requirements.txt: .venv requirements.in
 	# freezes requirements
-	$</bin/pip-compile --upgrade --build-isolation --output-file $@ $(word 2, $^)
+	$</bin/pip-compile --build-isolation --output-file $@ $(word 2, $^)
 
 devenv: .venv requirements.txt ## create a python virtual environment with tools to dev, run and tests cookie-cutter
 	# installing extra tools
-	@$</bin/pip3 install -r  $(word 2,$^)
+	@$</bin/pip3 install -r $(word 2, $^)
 	# your dev environment contains
 	@$</bin/pip3 list
 	@echo "To activate the virtual environment, run 'source $</bin/activate'"
@@ -54,21 +55,27 @@ devenv: .venv requirements.txt ## create a python virtual environment with tools
 
 
 # INTEGRATION -----------------------------------
-metatada = metadata/metadata.yml
-service.cli/run: $(metatada)
-	# Updates adapter script from metadata in $<
-	@.venv/bin/python3 tools/run_creator.py --metadata $< --runscript $@
+METADATA := metadata/metadata.yml
 
-docker-compose-meta.yml: $(metatada)
+
+VERSION: $(METADATA) ## generates VERSION from metadata
+	# updating $<
+	@ooil get-version --metadata-file $< > $@
+
+service.cli/run: $(METADATA) ## generates run from metadata
+	# Updates adapter script from metadata in $<
+	@ooil run-creator --metadata $< --runscript $@
+
+docker-compose-meta.yml: $(METADATA) ## generates docker-copose from metadata
 	# Injects metadata from $< as labels
-	@.venv/bin/python3 tools/update_compose_labels.py --compose $@ --metadata $<
+	@ooil compose --to-spec-file $@ --metadata $<
 
 define _docker_compose_build
 export DOCKER_BUILD_TARGET=$(if $(findstring -devel,$@),development,$(if $(findstring -cache,$@),cache,production)); \
 $(if $(findstring -x,$@),\
-	docker buildx > /dev/null; export DOCKER_CLI_EXPERIMENTAL=enabled; docker buildx bake  --file docker-compose-build.yml --file docker-compose-meta.yml $(if $(findstring -nc,$@),--no-cache,);,\
+	docker buildx > /dev/null; export DOCKER_CLI_EXPERIMENTAL=enabled; docker buildx bake  --file docker-compose-meta.yml --file docker-compose-build.yml $(if $(findstring -nc,$@),--no-cache,);,\
 	$(if $(findstring -kit,$@),export DOCKER_BUILDKIT=1;export COMPOSE_DOCKER_CLI_BUILD=1;,) \
-	docker-compose --file docker-compose-build.yml --file docker-compose-meta.yml build $(if $(findstring -nc,$@),--no-cache,) --parallel;\
+	docker-compose --file docker-compose-meta.yml --file docker-compose-build.yml build $(if $(findstring -nc,$@),--no-cache,) --parallel;\
 )
 endef
 
@@ -112,14 +119,19 @@ tests: tests-unit tests-integration ## runs unit and integration tests
 
 
 # PUBLISHING -----------------------------------
-define _bumpversion
-	# upgrades as $(subst $(1),,$@) version, commits and tags
-	@bump2version --verbose --list --config-file $(1) $(subst $(2),,$@)
-endef
 
 .PHONY: version-service-patch version-service-minor version-service-major
-version-service-patch version-service-minor version-service-major: versioning/service.cfg ## kernel/service versioning as patch
-	@$(call _bumpversion,$<,version-service-)
+version-service-patch version-service-minor version-service-major: $(METADATA) ## kernel/service versioning as patch
+	ooil bump-version --metadata-file $<  --upgrade $(subst version-service-,,$@)
+	# syncing metadata upstream
+	@$(MAKE) VERSION
+	@$(MAKE) docker-compose-meta.yml
+
+.PHONY: version-integration-patch version-integration-minor version-integration-major
+version-integration-patch version-integration-minor version-integration-major: $(METADATA) ## integration versioning as patch (bug fixes not affecting API/handling), minor/major (backwards-compatible/INcompatible API changes)
+	ooil bump-version --metadata-file $<  --upgrade $(subst version-integration-,,$@) integration-version
+	# syncing metadata upstream
+	@$(MAKE) docker-compose-meta.yml
 
 .PHONY: tag-local
 tag-local:
@@ -147,12 +159,6 @@ push-latest push-version: ## publish service to registry with latest/version tag
 
 pull-latest pull-version: ## pull service from registry
 	@docker pull $(DOCKER_REGISTRY)/$(DOCKER_IMAGE_NAME):$(if $(findstring version,$@),$(DOCKER_IMAGE_TAG),latest)
-
-
-.PHONY: version-integration-patch version-integration-minor version-integration-major
-version-integration-patch version-integration-minor version-integration-major: versioning/integration.cfg ## integration versioning as patch (bug fixes not affecting API/handling), minor/major (backwards-compatible/INcompatible API changes)
-	@$(call _bumpversion,$<,version-integration-)
-
 
 
 
@@ -218,10 +224,26 @@ help: ## this colorful help
 
 
 .PHONY: clean clean-force
-git_clean_args = -dxf -e .vscode/ -e .venv
+git_clean_args = -dxf --exclude=.vscode/ --exclude=.venv --exclude=.python-version
 clean: ## cleans all unversioned files in project and temp files create by this makefile
 	# Cleaning unversioned
 	@git clean -n $(git_clean_args)
 	@echo -n "Are you sure? [y/N] " && read ans && [ $${ans:-N} = y ]
 	@echo -n "$(shell whoami), are you REALLY sure? [y/N] " && read ans && [ $${ans:-N} = y ]
 	@git clean $(git_clean_args)
+
+.PHONY: info
+info:
+	# integration tools
+	@ooil --version
+	# variables
+	@echo "VCS_URL                     : $(VCS_URL)"
+	@echo "VCS_REF                     : $(VCS_REF)"
+	@echo "VCS_STATUS                  : $(VCS_STATUS)"
+	@echo "BUILD_DATE                  : $(BUILD_DATE)"
+	@echo "METADATA                    : $(METADATA)"
+	@echo "DOCKER_REGISTRY             : $(DOCKER_REGISTRY)"
+	@echo "DOCKER_IMAGE_NAME           : $(DOCKER_IMAGE_NAME)"
+	@echo "DOCKER_IMAGE_TAG            : $(DOCKER_IMAGE_TAG)"
+	@echo "COMPOSE_INPUT_DIR           : $(COMPOSE_INPUT_DIR)"
+	@echo "COMPOSE_OUTPUT_DIR          : $(COMPOSE_OUTPUT_DIR)"
