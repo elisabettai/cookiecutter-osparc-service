@@ -10,32 +10,25 @@ env:
   DOCKER_USERNAME: {{ "${{ secrets.DOCKER_USERNAME }}" }}
   DOCKER_PASSWORD: {{ "${{ secrets.DOCKER_PASSWORD }}" }}
 
-
 jobs:
   build:
     name: building {{ cookiecutter.project_slug }}
     runs-on: {{ "${{ matrix.os }}" }}
     strategy:
       matrix:
-        python: [3.8]
-        os: [ubuntu-18.04]
-        node: [10]
+        python: [3.9]
+        os: [ubuntu-22.04]
       fail-fast: false
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - name: setup python environment
-        uses: actions/setup-python@v1.1.1
+        uses: actions/setup-python@v4
         with:
           python-version: {{ "${{ matrix.python }}" }}
+          cache: "pip"
+          cache-dependency-path: "**/requirements*.txt"
       - name: show versions
-        run: ./ci/helpers/show_system_versions.bash
-      - uses: actions/cache@v1
-        name: getting cached data
-        with:
-          path: ~/.cache/pip
-          key: {{ "${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}" }}
-          restore-keys: |
-            {{ "${{ runner.os }}" }}-pip-
+        run: ./scripts/show_system_versions.bash
       - name: set owner variable
         run: echo "OWNER=${GITHUB_REPOSITORY%/*}" >> $GITHUB_ENV
       - name: set docker image tag
@@ -52,12 +45,12 @@ jobs:
       - name: test
         run: make tests
       - if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-        name: deploy
+        name: push
         run: |
-          ./ci/helpers/dockerhub_login.bash
+          ./scripts/dockerhub_login.bash
           make push
       - if: github.event_name == 'push' && github.ref != 'refs/heads/master'
-        name: deploy
+        name: push
         run: |
-          ./ci/helpers/dockerhub_login.bash
+          ./scripts/dockerhub_login.bash
           make push-version

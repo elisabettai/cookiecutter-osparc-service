@@ -23,68 +23,42 @@ export DOCKER_IMAGE_TAG  ?= $(shell cat VERSION 2> /dev/null || echo undefined)
 export COMPOSE_INPUT_DIR  := ./validation/input
 export COMPOSE_OUTPUT_DIR := .tmp/output
 
+OSPARC_DIR:=$(CURDIR)/.osparc
+
 APP_NAME := {{ cookiecutter.project_slug }}
 
 
-# ENVIRON ----------------------------------
-.PHONY: devenv
-.venv:
-	python3 -m venv $@
-	# upgrading package managers
-	$@/bin/pip3 install --upgrade \
-		pip \
-		wheel \
-		setuptools
-	# tooling
-	$@/bin/pip3 install \
-		pip-tools
 
 
-requirements.txt: .venv requirements.in
-	# freezes requirements
-	$</bin/pip-compile --build-isolation --output-file $@ $(word 2, $^)
-
-devenv: .venv requirements.txt ## create a python virtual environment with tools to dev, run and tests cookie-cutter
-	# installing extra tools
-	@$</bin/pip3 install -r $(word 2, $^)
-	# your dev environment contains
-	@$</bin/pip3 list
-	@echo "To activate the virtual environment, run 'source $</bin/activate'"
+# INTEGRATION -----------------------------------------------------------------
+METADATA := .osparc/metadata.yml
 
 
-
-
-# INTEGRATION -----------------------------------
-METADATA := metadata/metadata.yml
-
-
+.PHONY: VERSION
 VERSION: $(METADATA) ## generates VERSION from metadata
-	# updating $<
-	@ooil get-version --metadata-file $< > $@
+	# updating $@ from $<
+	@$(OSPARC_DIR)/bin/ooil.bash get-version --metadata-file $< > $@
 
 service.cli/run: $(METADATA) ## generates run from metadata
 	# Updates adapter script from metadata in $<
-	@ooil run-creator --metadata $< --runscript $@
+	@$(OSPARC_DIR)/bin/ooil.bash run-creator --metadata $< --runscript $@
 
-docker-compose-meta.yml: $(METADATA) ## generates docker-copose from metadata
+docker-compose.yml: $(METADATA) ## generates docker-compose
 	# Injects metadata from $< as labels
-	@ooil compose --to-spec-file $@ --metadata $<
+	@$(OSPARC_DIR)/bin/ooil.bash compose --to-spec-file $@ --metadata $<
+
+
+
+# BUILD -----------------------------------------------------------------
 
 define _docker_compose_build
 export DOCKER_BUILD_TARGET=$(if $(findstring -devel,$@),development,$(if $(findstring -cache,$@),cache,production)); \
-$(if $(findstring -x,$@),\
-	docker buildx > /dev/null; export DOCKER_CLI_EXPERIMENTAL=enabled; docker buildx bake  --file docker-compose-meta.yml --file docker-compose-build.yml $(if $(findstring -nc,$@),--no-cache,);,\
-	$(if $(findstring -kit,$@),export DOCKER_BUILDKIT=1;export COMPOSE_DOCKER_CLI_BUILD=1;,) \
-	docker-compose --file docker-compose-meta.yml --file docker-compose-build.yml build $(if $(findstring -nc,$@),--no-cache,) --parallel;\
-)
+	docker buildx bake  --file docker-compose.yml $(if $(findstring -nc,$@),--no-cache,);
 endef
 
 
-
-
-# DOCKER -----------------------------------
-.PHONY: build build-devel build-kit-devel build-x build-devel-x
-build build-devel build-kit build-kit-devel build-x build-devel-x: docker-compose-build.yml docker-compose-meta.yml service.cli/run ## builds images, -devel in development mode, -kit using docker buildkit, -x using docker buildX (if installed)
+.PHONY: build build-devel build-nc build-devel-nc
+build build-devel build-nc build-devel-nc: docker-compose.yml service.cli/run ## builds image
 	# building image local/${DOCKER_IMAGE_NAME}...
 	@$(call _docker_compose_build)
 
@@ -93,6 +67,8 @@ define show-meta
 		docker image inspect $(iid) | jq '.[0] | .RepoTags, .ContainerConfig.Labels, .Config.Labels';)
 endef
 
+
+.PHONY: info-build
 info-build: ## displays info on the built image
 	# Built images
 	@docker images */$(DOCKER_IMAGE_NAME):*
@@ -100,38 +76,21 @@ info-build: ## displays info on the built image
 	@$(call show-meta,$(DOCKER_IMAGE_NAME))
 
 
-
-
-# TESTS-----------------------------------
-.PHONY: tests tests-unit tests-integration
-tests-unit tests-integration: ## runs integration and unit tests
-	@.venv/bin/pytest -vv \
-		--basetemp=$(CURDIR)/tmp \
-		--exitfirst \
-		--failed-first \
-		--pdb \
-		--junitxml=pytest_$(subst tests-,,$@)test.xml \
-		$(CURDIR)/tests/$(subst tests-,,$@)
-
-tests: tests-unit tests-integration ## runs unit and integration tests
+# TESTS-----------------------------------------------------------------
+.PHONY: test tests
+test tests:  ## runs validation tests
+	@$(OSPARC_DIR)/bin/ooil.bash test .
 
 
 
-
-# PUBLISHING -----------------------------------
+# PUBLISHING -----------------------------------------------------------------
 
 .PHONY: version-service-patch version-service-minor version-service-major
 version-service-patch version-service-minor version-service-major: $(METADATA) ## kernel/service versioning as patch
-	ooil bump-version --metadata-file $<  --upgrade $(subst version-service-,,$@)
+	$(OSPARC_DIR)/bin/ooil.bash bump-version --metadata-file $<  --upgrade $(subst version-service-,,$@)
 	# syncing metadata upstream
 	@$(MAKE) VERSION
-	@$(MAKE) docker-compose-meta.yml
 
-.PHONY: version-integration-patch version-integration-minor version-integration-major
-version-integration-patch version-integration-minor version-integration-major: $(METADATA) ## integration versioning as patch (bug fixes not affecting API/handling), minor/major (backwards-compatible/INcompatible API changes)
-	ooil bump-version --metadata-file $<  --upgrade $(subst version-integration-,,$@) integration-version
-	# syncing metadata upstream
-	@$(MAKE) docker-compose-meta.yml
 
 .PHONY: tag-local
 tag-local:
@@ -163,49 +122,8 @@ pull-latest pull-version: ## pull service from registry
 
 
 
-# DEVELOPMENT ----------------------------------------
-# NOTE: since using docker-compose would create the folders automatically but as root user, which is inconvenient
-define _clean_output_dirs
-	# cleaning output directory
-	rm -rf $(COMPOSE_OUTPUT_DIR)/*
-endef
-$(COMPOSE_OUTPUT_DIR):
-	@$(call _clean_output_dirs)
-	mkdir -p $@
-	# created output directory $(COMPOSE_OUTPUT_DIR)
+# COOCKIECUTTER -----------------------------------------------------------------
 
-docker-compose-configs = $(wildcard docker-compose.*yml)
-
-.compose-production.yml .compose-development.yml: $(docker-compose-configs)
-	# creating config for stack with 'local/$(DOCKER_IMAGE_NAME):$(patsubst .compose-%.yml,%,$@)' to $@
-	@export DOCKER_REGISTRY=local; \
-	export DOCKER_IMAGE_TAG=$(patsubst .compose-%.yml,%,$@); \
-	docker-compose -f docker-compose.yml $(if $(findstring -development,$@), -f docker-compose.devel.yml,) --log-level=ERROR config > $@
-
-define _docker_compose_cli
-	$(eval docker_compose_path=.compose-$(if $(findstring devel,$@),development,production).yml)
-	$(MAKE) $(docker_compose_path)
-	@docker-compose -f $(docker_compose_path) $(1)
-endef
-
-.PHONY: down up up-devel shell shell-devel
-up up-devel: $(COMPOSE_INPUT_DIR) $(COMPOSE_OUTPUT_DIR) down ## Starts the service for testing. Devel mode mounts the folders for direct development.
-	# starting a service
-	$(call _docker_compose_cli,up)
-
-shell shell-devel: $(COMPOSE_INPUT_DIR) $(COMPOSE_OUTPUT_DIR) down ## Starts a shell instead of running the container. Useful for development.
-	# starting service and go in...
-	$(call _docker_compose_cli,run --service-ports $(APP_NAME) /bin/sh)
-
-down: .compose-development.yml ## stops the service
-	@docker-compose -f $< down
-
-
-
-
-
-
-# MISCELANEOUS -----------------------------------
 .PHONY: replay
 replay: .cookiecutterrc ## re-applies cookiecutter
 	# Replaying {{ cookiecutter._template }} ...
@@ -215,6 +133,36 @@ replay: .cookiecutterrc ## re-applies cookiecutter
 		"{{ cookiecutter._template }}"
 
 
+
+.PHONY: info
+info: ## general info
+	# env vars: version control
+	@echo " VCS_URL                     : $(VCS_URL)"
+	@echo " VCS_REF                     : $(VCS_REF)"
+	@echo " VCS_STATUS                  : $(VCS_STATUS)"
+	# env vars: docker
+	@echo " DOCKER_REGISTRY             : $(DOCKER_REGISTRY)"
+	@echo " DOCKER_IMAGE_NAME           : $(DOCKER_IMAGE_NAME)"
+	@echo " DOCKER_IMAGE_TAG            : $(DOCKER_IMAGE_TAG)"
+	@echo " COMPOSE_INPUT_DIR           : $(COMPOSE_INPUT_DIR)"
+	@echo " COMPOSE_OUTPUT_DIR          : $(COMPOSE_OUTPUT_DIR)"
+	@echo " BUILD_DATE                  : $(BUILD_DATE)"
+	# exe: recommended dev tools
+	@echo ' git                         : $(shell git --version 2>/dev/null || echo not found)'
+	@echo ' make                        : $(shell make --version 2>&1 | head -n 1)'
+	@echo ' jq                          : $(shell jq --version 2>/dev/null || echo not found z)'
+	@echo ' awk                         : $(shell awk -W version 2>&1 | head -n 1 2>/dev/null || echo not found)'
+	@echo ' python                      : $(shell python3 --version 2>/dev/null || echo not found )'
+	@echo ' docker                      : $(shell docker --version)'
+	@echo ' docker buildx               : $(shell docker buildx version)'
+	@echo ' docker-compose              : $(shell docker-compose --version)'
+	# exe: integration tools
+	@echo ' ooil version                : $(shell $(OSPARC_DIR)/bin/ooil.bash --version)'
+
+
+
+# MISC -----------------------------------------------------------------
+
 .PHONY: help
 help: ## this colorful help
 	@echo "Recipes for '$(notdir $(CURDIR))':"
@@ -223,27 +171,12 @@ help: ## this colorful help
 	@echo ""
 
 
-.PHONY: clean clean-force
-git_clean_args = -dxf --exclude=.vscode/ --exclude=.venv --exclude=.python-version
+.PHONY: clean
+git_clean_args = -dxf --exclude=.vscode/
+
 clean: ## cleans all unversioned files in project and temp files create by this makefile
 	# Cleaning unversioned
 	@git clean -n $(git_clean_args)
 	@echo -n "Are you sure? [y/N] " && read ans && [ $${ans:-N} = y ]
 	@echo -n "$(shell whoami), are you REALLY sure? [y/N] " && read ans && [ $${ans:-N} = y ]
 	@git clean $(git_clean_args)
-
-.PHONY: info
-info:
-	# integration tools
-	@ooil --version
-	# variables
-	@echo "VCS_URL                     : $(VCS_URL)"
-	@echo "VCS_REF                     : $(VCS_REF)"
-	@echo "VCS_STATUS                  : $(VCS_STATUS)"
-	@echo "BUILD_DATE                  : $(BUILD_DATE)"
-	@echo "METADATA                    : $(METADATA)"
-	@echo "DOCKER_REGISTRY             : $(DOCKER_REGISTRY)"
-	@echo "DOCKER_IMAGE_NAME           : $(DOCKER_IMAGE_NAME)"
-	@echo "DOCKER_IMAGE_TAG            : $(DOCKER_IMAGE_TAG)"
-	@echo "COMPOSE_INPUT_DIR           : $(COMPOSE_INPUT_DIR)"
-	@echo "COMPOSE_OUTPUT_DIR          : $(COMPOSE_OUTPUT_DIR)"
